@@ -1,0 +1,62 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-tool'  // Set environment variable for Sonar Scanner
+        SONAQUBE_CRED = 'sonar-cred'  // Replace with your SonarQube credentials ID
+        SONAQUBE_INSTALLATION = 'sonar-server'  // Replace with your SonarQube installation name in Jenkins
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout SCM') {
+            steps {
+                git branch: 'main', url: 'https://github.com/adoukpo/week14-project-1.git'
+            }
+        }
+        stage('Identify Maven Project') {
+            steps {
+                script {
+                    def pomDir = sh(script: "find . -name 'pom.xml' -exec dirname {} \\;", returnStdout: true).trim()
+                    env.POM_DIR = pomDir
+                }
+            }
+        }
+        stage('Maven Compile') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn clean compile'
+                }
+            }
+        }
+        stage('Maven Test') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn test'
+                }
+            }
+        }
+        stage('Sonarqube Scan'){
+            steps{
+                withSonarQubeEnv(credentialsId: "${SONAQUBE_CRED}", installationName: "${SONAQUBE_INSTALLATION}") {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=${APP_NAME} -Dsonar.projectKey=${APP_NAME} \
+                          -Dsonar.java.binaries=. '''
+                }
+            }
+        }
+        // Quality Gate Stage
+        stage("Quality Gate") {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-cred'
+                }
+            }
+        }
+    }
+}
