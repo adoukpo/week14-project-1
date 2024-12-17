@@ -1,0 +1,194 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+        python 'python3'  // Install Python for additional tasks
+    }
+    environment {
+        SCANNER_HOME = tool 'sonar-tool'  // Set environment variable for Sonar Scanner
+        SONAQUBE_CRED = 'sonar-cred'  // Replace with your SonarQube credentials ID
+        SONAQUBE_INSTALLATION = 'sonar-server'  // Replace with your SonarQube installation name in Jenkins
+        TF_VAR_AWS_REGION = 'us-east-1' // Terraform AWS region
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout SCM') {
+            steps {
+                git branch: 'main', url: 'https://github.com/adoukpo/week14-project-1.git'
+            }
+        }
+        stage('Identify Maven Project') {
+            steps {
+                script {
+                    def pomDir = sh(script: "find . -name 'pom.xml' -exec dirname {} \\;", returnStdout: true).trim()
+                    env.POM_DIR = pomDir
+                }
+            }
+        }
+        stage('Maven Compile') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn clean compile'
+                }
+            }
+        }
+        stage('Maven Test') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn test'
+                }
+            }
+        }
+        stage('Sonarqube Scan') {
+            steps {
+                withSonarQubeEnv(credentialsId: "${SONAQUBE_CRED}", installationName: "${SONAQUBE_INSTALLATION}") {
+                    sh ''' 
+                        $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=${APP_NAME} -Dsonar.projectKey=${APP_NAME} \
+                        -Dsonar.java.binaries=. 
+                    '''
+                }
+            }
+        }
+        stage("Quality Gate") {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-cred'
+                }
+            }
+        }
+        stage('Maven Build') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn clean package'
+                }
+            }
+        }
+        
+        // Infrastructure-related stages
+        stage('Provision Infrastructure with Terraform') {
+            steps {
+                script {
+                    // Provision infrastructure using Terraform
+                    sh 'terraform init'
+                    sh 'terraform apply -auto-approve'
+                }
+            }
+        }
+        
+        stage('Validate Infrastructure with Terraform') {
+            steps {
+                script {
+                    // Run infrastructure validation (e.g., using a script or a Terraform validation)
+                    sh 'terraform validate'
+                }
+            }
+        }
+        
+        stage('Configure Infrastructure with Ansible') {
+            steps {
+                script {
+                    // Configure infrastructure using Ansible or another configuration management tool
+                    sh 'ansible-playbook -i inventory/production setup.yml'
+                }
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    // Use kubectl to deploy the application to a Kubernetes cluster
+                    sh 'kubectl apply -f k8s/deployment.yml'
+                    sh 'kubectl rollout status deployment/my-app'
+                }
+            }
+        }
+
+        stage('Integration Tests') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn verify -Pintegration'
+                }
+            }
+        }
+        
+        stage('Deploy to Production with Kubernetes') {
+            steps {
+                input message: 'Approve Deployment to Production?', ok: 'Deploy'
+                script {
+                    sh 'kubectl apply -f k8s/prod-deployment.yml'
+                    sh 'kubectl rollout status deployment/my-app-prod'
+                }
+            }
+        }
+
+        stage('Smoke Testing') {
+            steps {
+                script {
+                    // Perform basic health checks on the deployed infrastructure (e.g., API status, database availability)
+                    sh 'curl -I http://production-server/health'
+                }
+            }
+        }
+        
+        stage('Setup Monitoring') {
+            steps {
+                script {
+                    // Set up monitoring (e.g., CloudWatch, Prometheus) on the infrastructure
+                    sh 'terraform apply -target=module.monitoring'
+                }
+            }
+        }
+
+        stage('Rollback (If Needed)') {
+            steps {
+                script {
+                    // Rollback to previous stable environment if the deployment fails
+                    sh 'terraform destroy -target=module.production'
+                    sh 'terraform apply -target=module.previous-stable-production'
+                }
+            }
+        }
+
+        stage('Post-Deployment Testing') {
+            steps {
+                script {
+                    // Run additional end-to-end or performance tests after deployment
+                    sh 'mvn test -Pintegration,performance'
+                }
+            }
+        }
+
+        stage('Notify') {
+            steps {
+                script {
+                    slackSend(channel: '#build-notifications', message: "Build ${currentBuild.currentResult}: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
+                }
+            }
+        }
+        
+        stage('Python Script for Infrastructure Management') {
+            steps {
+                script {
+                    // Use Python for additional infrastructure-related tasks like notifications, health checks, or logging
+                    sh 'python3 scripts/infrastructure_health_check.py'
+                }
+            }
+        }
+        
+        stage('Archive Artifacts') {
+            steps {
+                archiveArtifacts artifacts: '**/target/*.jar', allowEmptyArchive: true
+            }
+        }
+        stage('Cleanup') {
+            steps {
+                cleanWs()
+            }
+        }
+    }
+}

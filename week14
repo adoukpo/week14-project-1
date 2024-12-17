@@ -1,0 +1,208 @@
+pipeline {
+    agent any
+    tools {
+        jdk 'jdk17'
+        terraform 'terraform'  // Install Terraform
+        maven 'maven3'
+    }
+    environment {
+        AWS_REGION = 'us-east-1'  // AWS region
+        TF_VAR_AWS_REGION = 'us-east-1'
+        SONAQUBE_CRED = 'sonar-cred'  // Replace with your SonarQube credentials ID
+        SONAQUBE_INSTALLATION = 'sonar-server'  // Replace with your SonarQube installation name in Jenkins
+    }
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('Checkout SCM') {
+            steps {
+                git branch: 'main', url: 'https://github.com/your-repository.git'
+            }
+        }
+        stage('Identify Maven Project') {
+            steps {
+                script {
+                    def pomDir = sh(script: "find . -name 'pom.xml' -exec dirname {} \\;", returnStdout: true).trim()
+                    env.POM_DIR = pomDir
+                }
+            }
+        }
+        stage('Maven Compile') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn clean compile'
+                }
+            }
+        }
+        stage('Maven Test') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn test'
+                }
+            }
+        }
+        stage('SonarQube Scan') {
+            steps {
+                withSonarQubeEnv(credentialsId: "${SONAQUBE_CRED}", installationName: "${SONAQUBE_INSTALLATION}") {
+                    sh ''' 
+                        $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=${APP_NAME} -Dsonar.projectKey=${APP_NAME} \
+                        -Dsonar.java.binaries=. 
+                    '''
+                }
+            }
+        }
+        stage("Quality Gate") {
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-cred'
+                }
+            }
+        }
+        stage('Maven Build') {
+            steps {
+                dir(env.POM_DIR) {
+                    sh 'mvn clean package'
+                }
+            }
+        }
+
+        // Infrastructure-related stages
+        stage('Provision Infrastructure with Terraform') {
+            steps {
+                script {
+                    // Initialize Terraform and apply configuration to provision infrastructure
+                    sh 'terraform init'
+                    sh 'terraform apply -auto-approve'
+                }
+            }
+        }
+
+        stage('Validate Infrastructure with Terraform') {
+            steps {
+                script {
+                    // Validate Terraform configuration
+                    sh 'terraform validate'
+                }
+            }
+        }
+
+        stage('Configure Infrastructure with Ansible') {
+            steps {
+                script {
+                    // Apply configuration management with Ansible (installing software, configuring instances)
+                    sh 'ansible-playbook -i inventory/production setup.yml'
+                }
+            }
+        }
+
+        stage('Create RDS Database') {
+            steps {
+                script {
+                    // Provision RDS MySQL Database using Terraform
+                    sh 'terraform apply -target=aws_db_instance.utc-dev-database'
+                }
+            }
+        }
+
+        stage('Setup EFS') {
+            steps {
+                script {
+                    // Provision EFS File System
+                    sh 'terraform apply -target=aws_efs_file_system.utc-efs'
+                }
+            }
+        }
+
+        stage('Deploy to EC2') {
+            steps {
+                script {
+                    // Deploy the application to EC2 instances using SSH or User Data scripts
+                    sh 'aws ec2 run-instances --image-id ami-xxxxxx --count 2 --instance-type t2.micro --security-group-ids sg-xxxxxx --subnet-id subnet-xxxxxx --key-name utc-key'
+                }
+            }
+        }
+
+        stage('Setup Load Balancer (ALB)') {
+            steps {
+                script {
+                    // Provision Load Balancer and target group
+                    sh 'terraform apply -target=aws_lb.utc-alb'
+                }
+            }
+        }
+
+        stage('Create Auto Scaling Group') {
+            steps {
+                script {
+                    // Setup Auto Scaling Group with dynamic scaling based on CPU
+                    sh 'terraform apply -target=aws_autoscaling_group.utc-asg'
+                }
+            }
+        }
+
+        stage('Create SNS Topic and Notifications') {
+            steps {
+                script {
+                    // Create SNS topic for scaling events and notifications
+                    sh 'terraform apply -target=aws_sns_topic.utc-auto-scaling'
+                }
+            }
+        }
+
+        stage('Route 53 DNS Setup') {
+            steps {
+                script {
+                    // Create Route 53 DNS record for the domain
+                    sh 'terraform apply -target=aws_route53_record.utc-domain'
+                }
+            }
+        }
+
+        stage('Monitor Infrastructure with CloudWatch') {
+            steps {
+                script {
+                    // Setup CloudWatch monitoring for all resources
+                    sh 'terraform apply -target=aws_cloudwatch_log_group.utc-logs'
+                }
+            }
+        }
+
+        stage('Smoke Test and Rollback') {
+            steps {
+                script {
+                    // Run basic health checks on the deployed infrastructure (e.g., health checks for app, database)
+                    sh 'curl -I http://yourapp.com/health'
+                    
+                    // If necessary, implement rollback logic
+                    sh 'terraform destroy -target=aws_instance.utc-dev-instance'
+                }
+            }
+        }
+
+        stage('Notify via Slack') {
+            steps {
+                script {
+                    slackSend(channel: '#build-notifications', message: "Build ${currentBuild.currentResult}: ${env.JOB_NAME} #${env.BUILD_NUMBER}")
+                }
+            }
+        }
+
+        stage('Post-Deployment Testing') {
+            steps {
+                script {
+                    // Run tests after deployment (integration tests, API tests)
+                    sh 'mvn test -Pintegration'
+                }
+            }
+        }
+
+        stage('Cleanup') {
+            steps {
+                cleanWs()
+            }
+        }
+    }
+}
